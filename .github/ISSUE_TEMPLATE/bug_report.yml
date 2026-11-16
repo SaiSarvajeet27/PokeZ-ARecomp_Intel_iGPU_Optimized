@@ -1,0 +1,60 @@
+name: Bug or crash
+description: Something doesn't work, looks wrong or crashes in the Intel iGPU Edition
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Please never attach game files, keys, extracted data or fonts - only logs and screenshots.
+  - type: input
+    id: version
+    attributes:
+      label: Edition version
+      description: Shown on the start screen (for example v0.1.23a).
+      placeholder: v0.1.23a
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: CPU and GPU
+      placeholder: Intel Core i3-1215U, Intel UHD Graphics
+    validations:
+      required: true
+  - type: input
+    id: driver
+    attributes:
+      label: Graphics driver version
+      placeholder: 32.0.101.7092
+  - type: input
+    id: game
+    attributes:
+      label: Game version and DLC
+      placeholder: 2.0.2 with Mega Dimension
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what happened instead. Screenshots help.
+    validations:
+      required: true
+  - type: dropdown
+    id: upstream
+    attributes:
+      label: Does it also happen on upstream ZA Recomp?
+      options:
+        - I didn't try
+        - "No, only in this edition"
+        - "Yes, upstream too"
+  - type: textarea
+    id: switches
+    attributes:
+      label: Off switches tried
+      description: If you turned changes off (docs/INTEL.md lists them), which ones and did it help?
+  - type: textarea
+    id: log
+    attributes:
+      label: logs/play.log
+      description: Drag the file in, or paste it. It is next to lasrecomp.exe, in the logs folder.
+    validations:
+      required: true

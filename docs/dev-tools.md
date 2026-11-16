@@ -7,8 +7,6 @@ same with or without it. Windows only for now, except the replay scripts' runtim
 > **Never commit or attach Nintendo files:** keys, game files, `extracted/`, saves, or captures and screenshots of the
 > game. A recording holds a copy of a save, and a full capture holds game data. Keep both out of git and out of issues.
 
-Portuguese: [dev-tools.pt-BR.md](dev-tools.pt-BR.md).
-
 ## Setup
 
 You need your own game files, already set up (`exefs/` + `romfs.bin`) and a compiled `lasgame.dll`.

@@ -62,8 +62,9 @@ register needs, not the translation (the same with every translation change trie
 
 ## Controls: a PC layout (mouse and keyboard)
 
-F1 > Controls > Keyboard > **Keys: PC layout** sets it in one go (the defaults stay upstream's, so an existing install
-keeps its keys until you choose it). The game's on-screen button icons name these keys - and LMB / RMB for the mouse
+A new install starts with it (the release's first-run settings, `tools/za/za-default.ini`); F1 > Controls > Keyboard >
+**Keys: PC layout** sets it in one go on an existing install, which keeps its own keys until then (the built-in
+defaults stay upstream's). The game's on-screen button icons name these keys - and LMB / RMB for the mouse
 buttons - from the next start.
 
 | Key | Game (Switch) | Action |

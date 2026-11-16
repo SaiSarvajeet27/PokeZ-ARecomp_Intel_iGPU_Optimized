@@ -80,7 +80,7 @@ cp third_party/fonts/Baloo2/OFL.txt "$D/Baloo2-OFL.txt"
 cp README.md LICENSE "$D/"
 mkdir -p "$D/docs"
 cp docs/XBOX-ATTACK-LAYOUT.md "$D/docs/"
-[ -f README.pt-BR.md ] && cp README.pt-BR.md "$D/"
+cp docs/INTEL.md "$D/docs/"  # (this edition: what changed, the off switches)
 # DirectX 12 (F1 > Display > Graphics API): the patched Dozen, dxil.dll and its DLLs in dx12/, the Agility SDK's
 # D3D12Core.dll in D3D12/ (tools/dx12/build_dozen.sh, made here once)
 [ -f build/dx12/dx12/vulkan_dzn.dll ] || bash tools/dx12/build_dozen.sh
