@@ -275,9 +275,12 @@ static void pick_device(void) {
     g_gpu_vendor = g_vk.props.vendorID;  // (settings.c gpu_feature_on: the Compatibility features' Auto)
     // Intel's Windows drivers before Vulkan 1.3.216 (UHD 630 1.3.215 #8 #46, Iris Xe 1.3.212 #88) crash inside
     // vkCmdBeginRendering reading near a null pointer, and placeholder attachments only moved the crash to a later pass:
-    // those run on render passes instead, the compat_rp.c way (LARECOMP_VK_INTEL_RENDER_PASSES=0: dynamic rendering)
+    // those run on render passes instead, the compat_rp.c way (LARECOMP_VK_INTEL_RENDER_PASSES=0: dynamic rendering).
+    // Newer Intel drivers too: Z-A breaks its frame into ~105 passes, and Intel's driver runs them much faster as
+    // classic render passes than as dynamic rendering (UHD Graphics, i3-1215U, driver 101.7092 / Vulkan 1.4.323, native
+    // 1080p outdoors: 14.1 -> 21.6 fps, the same image)
     const char *irp = getenv("LARECOMP_VK_INTEL_RENDER_PASSES");
-    g_intel_rp = irp ? atoi(irp) != 0 : g_vk.props.vendorID == 0x8086 && g_vk.props.apiVersion < VK_MAKE_API_VERSION(0, 1, 3, 216);
+    g_intel_rp = irp ? atoi(irp) != 0 : g_vk.props.vendorID == 0x8086;
     g_vkc.api = g_vk.props.apiVersion >= VK_API_VERSION_1_3 && !ENV("LARECOMP_VK_COMPAT") && !g_intel_rp ? VK_API_VERSION_1_3 : VK_API_VERSION_1_2;
     uint32_t nq = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nq, NULL);
@@ -859,6 +862,10 @@ static void create_device(void) {
     // isolated: alone of the features tried, it crashed when turned back on) and v0.1.9 in a battle. F1 >
     // Compatibility; LARECOMP_VK_ROBUST2=0/1.
     bool x_rb2 = gpu_feature_on(GPU_ROBUST2, "LARECOMP_VK_ROBUST2") && has_ext(ep, ne, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
+    // Without it, images get the first robustness level (VK_EXT_image_robustness; buffers have robustBufferAccess
+    // always): a read past an image is still harmless - some value of its format instead of zeros (settings.c: off on
+    // Intel by default)
+    bool x_ir = has_ext(ep, ne, VK_EXT_IMAGE_ROBUSTNESS_EXTENSION_NAME);
     // Whether the window really shows the frames presented (present_watch). LARECOMP_NO_PRESENT_WATCH=1: not checked
     bool x_pw = !ENV("LARECOMP_NO_PRESENT_WATCH") && has_ext(ep, ne, VK_KHR_PRESENT_ID_EXTENSION_NAME) &&
                 has_ext(ep, ne, VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
@@ -919,7 +926,17 @@ static void create_device(void) {
     }
     x_rb2 = x_rb2 && have.features.robustBufferAccess && have_rb2.robustBufferAccess2 && have_rb2.robustImageAccess2;
     if (x_rb2) ext[n_ext++] = VK_EXT_ROBUSTNESS_2_EXTENSION_NAME;
+    if (x_ir && !x_rb2) {  // (Vulkan 1.3: core, in f13 below; 1.2: the extension)
+        VkPhysicalDeviceImageRobustnessFeaturesEXT q_ir = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_ROBUSTNESS_FEATURES_EXT};
+        VkPhysicalDeviceFeatures2 q = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &q_ir};
+        vkGetPhysicalDeviceFeatures2(g_vk.phys, &q);
+        x_ir = q_ir.robustImageAccess;
+        if (x_ir && !v13) ext[n_ext++] = VK_EXT_IMAGE_ROBUSTNESS_EXTENSION_NAME;
+    } else x_ir = false;
     x_pw = x_pw && have_pid.presentId && have_pw.presentWait;
+    g_vk.pipe_stats = ENV("LARECOMP_VK_PIPE_STATS") && atoi(ENV("LARECOMP_VK_PIPE_STATS")) &&
+                      has_ext(ep, ne, VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
+    if (g_vk.pipe_stats) ext[n_ext++] = VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME;
     if (x_pw) ext[n_ext++] = VK_KHR_PRESENT_ID_EXTENSION_NAME, ext[n_ext++] = VK_KHR_PRESENT_WAIT_EXTENSION_NAME;
     maxwell_output_layer = have12.shaderOutputLayer;  // (translate.c: without it, those writes are dropped)
     if (!have12.shaderOutputLayer) LOG("[vk] warning: no shaderOutputLayer (vertex shaders choosing the render target layer: layer 0)\n");
@@ -1032,15 +1049,21 @@ static void create_device(void) {
     VkPhysicalDeviceRobustness2FeaturesEXT rb2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT,
                                                   .robustBufferAccess2 = VK_TRUE, .robustImageAccess2 = VK_TRUE, .pNext = tail};
     if (x_rb2) tail = &rb2;
+    VkPhysicalDeviceImageRobustnessFeaturesEXT irf = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_ROBUSTNESS_FEATURES_EXT,
+                                                      .robustImageAccess = VK_TRUE, .pNext = tail};
+    if (x_ir && !v13) tail = &irf;
     VkPhysicalDevicePresentIdFeaturesKHR pid = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR, .presentId = VK_TRUE,
                                                 .pNext = tail};
     VkPhysicalDevicePresentWaitFeaturesKHR pw = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR,
                                                  .presentWait = VK_TRUE, .pNext = &pid};
     if (x_pw) tail = &pw;
+    VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR pef = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR, .pipelineExecutableInfo = VK_TRUE, .pNext = tail};
+    if (g_vk.pipe_stats) tail = &pef;
     VkPhysicalDeviceVulkan13Features f13 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
                                             .dynamicRendering = VK_TRUE, .synchronization2 = VK_TRUE, .subgroupSizeControl = VK_TRUE,
                                             .shaderDemoteToHelperInvocation = VK_TRUE, .shaderTerminateInvocation = VK_TRUE,
-                                            .maintenance4 = VK_TRUE, .pNext = tail};
+                                            .maintenance4 = VK_TRUE, .robustImageAccess = x_ir && v13, .pNext = tail};
     // (Vulkan 1.2: the extensions' feature structures instead)
     VkPhysicalDeviceExtendedDynamicState2FeaturesEXT fds2 = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT, .extendedDynamicState2 = VK_TRUE, .pNext = tail};
@@ -1221,7 +1244,8 @@ static void create_device(void) {
         LOG("[vk] vertex input: %s\n", g_vk.vids ? "dynamic (VK_EXT_vertex_input_dynamic_state)" :
             "in each pipeline (vkCmdSetVertexInputEXT missing)");
     }
-    LOG("[vk] robust buffer / image access 2: %s\n", x_rb2 ? "yes" : "no");
+    LOG("[vk] robust buffer / image access 2: %s%s\n", x_rb2 ? "yes" : "no",
+        x_rb2 ? "" : x_ir ? " (images: robust access 1, buffers: robustBufferAccess)" : " (buffers: robustBufferAccess)");
     g_present_wait = x_pw ? (PFN_vkWaitForPresentKHR)vkGetDeviceProcAddr(g_vk.dev, "vkWaitForPresentKHR") : NULL;
     LOG("[vk] present watch: %s\n", g_present_wait ? "yes" : "no (no VK_KHR_present_wait)");
 

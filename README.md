@@ -1,3 +1,50 @@
+## ZA Recomp: Intel iGPU + PC Controls (community fork, v0.1.23a)
+
+A fork of [ZA Recomp](https://github.com/Hexveil404/PokeZ-ARecomp) v0.1.23 that makes Pokémon Legends: Z-A
+run well on laptops with Intel integrated graphics, and play like a PC game.
+
+**Faster, with nothing turned down.** Measured on an i3-1215U (Intel UHD Graphics), native 1080p:
+
+| Scene | v0.1.23 | This fork |
+|---|---|---|
+| Lumiose courtyard, crowded | 14.1 fps | **30 fps locked** |
+| Hotel lobby | 25.7 fps (with upstream's binary patch) | **30 fps locked** |
+
+Same image: every change was checked against screenshots with that change on and off.
+
+The speed comes from changes to the renderer and the shader translator, not from lower settings:
+- Render passes Intel's driver runs faster.
+- Depth-pyramid copies done as one draw instead of 5 transfers.
+- Shaders with loops translated as plain code instead of a state machine.
+- Branch-free texture reads.
+- Single-instruction NaN-safe min / max.
+
+Each change has its own off switch.
+
+**Real PC controls.** One click in F1 > Controls > Keys: PC layout:
+- WASD to move, the mouse for the camera.
+- Left click throws, right click locks on.
+- F talks, Shift dashes, Space rolls, Tab opens the menu.
+- The mouse wheel switches Pokémon.
+- Enter and Backspace work in menus.
+
+The game's on-screen button icons show your keys, including LMB / RMB.
+
+**Tested.** 20,000 fuzzed shaders translate exactly as they did before. Upstream's tests pass, plus a new one
+for the control bindings.
+
+Details, measurements and off switches: [docs/INTEL.md](docs/INTEL.md)
+
+> You need your own copy of the game. This repository contains no game files, code or assets.
+>
+> Not affiliated with the upstream project, Nintendo, The Pokémon Company or Game Freak.
+>
+> Please report problems with this fork here, not upstream.
+
+*The upstream README follows. Its Download and Report a bug links lead to the original project.*
+
+---
+
 <div align="center">
 
 <img src="docs/icon/icon_1024.png" alt="ZA Recomp" width="128">

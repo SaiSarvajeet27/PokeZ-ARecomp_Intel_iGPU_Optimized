@@ -27,12 +27,14 @@ _Static_assert(PADB_LTRIGGER == SDL_GAMEPAD_BUTTON_COUNT, "trigger pseudo-button
     SDL_SCANCODE_KP_4, SDL_SCANCODE_KP_6}
 static const int16_t k_def_pad[BIND_PAD_COUNT] = DEF_PAD, k_def_key[BIND_KEY_COUNT] = DEF_KEY;
 int16_t g_bind_pad[BIND_PAD_COUNT] = DEF_PAD, g_bind_key[BIND_KEY_COUNT] = DEF_KEY;
-// mouse: left ZR (Pokémon Z-A throws the ball), right ZL (aims / locks on)
-#define DEF_MOUSE {BIND_ZR, BIND_ZL, -1, -1, -1}
+int16_t g_bind_key2[BIND_KEY_COUNT];
+// mouse: left ZR (Pokémon Z-A throws the ball), right ZL (aims / locks on); the wheel nothing
+#define DEF_MOUSE {BIND_ZR, BIND_ZL, -1, -1, -1, -1, -1}
 static const int16_t k_def_mouse[MOUSEB_COUNT] = DEF_MOUSE;
 int16_t g_bind_mouse[MOUSEB_COUNT] = DEF_MOUSE;
-static const char *const k_mouse_ini[MOUSEB_COUNT] = {"left", "right", "middle", "x1", "x2"};
-static const char *const k_mouse_names[MOUSEB_COUNT] = {"Left button", "Right button", "Middle button", "Back side button", "Forward side button"};
+static const char *const k_mouse_ini[MOUSEB_COUNT] = {"left", "right", "middle", "x1", "x2", "wheel_up", "wheel_down"};
+static const char *const k_mouse_names[MOUSEB_COUNT] = {"Left button", "Right button", "Middle button", "Back side button",
+                                                         "Forward side button", "Wheel up", "Wheel down"};
 
 const char *bind_mouse_name(int mb) { return mb >= 0 && mb < MOUSEB_COUNT ? k_mouse_names[mb] : "?"; }
 int bind_mouse_from_sdl(int b) {
@@ -131,7 +133,7 @@ static void result(int kind, int dev, int slot, int other);
 
 void bind_reset(int dev) {
     if (dev == BIND_DEV_PAD) memcpy(g_bind_pad, k_def_pad, sizeof g_bind_pad);
-    else memcpy(g_bind_key, k_def_key, sizeof g_bind_key);
+    else memcpy(g_bind_key, k_def_key, sizeof g_bind_key), memset(g_bind_key2, 0, sizeof g_bind_key2);
     LOG("[input] %s bindings reset to the defaults\n", dev == BIND_DEV_PAD ? "controller" : "keyboard");
     result(5, dev, -1, -1);
 }
@@ -188,12 +190,49 @@ bool bind_pad_face_is(bool xbox_letters) {
                               g_bind_pad[BIND_X] == SDL_GAMEPAD_BUTTON_NORTH && g_bind_pad[BIND_Y] == SDL_GAMEPAD_BUTTON_WEST;
 }
 
+static bool key2_none(void) {
+    for (int i = 0; i < BIND_KEY_COUNT; i++) if (g_bind_key2[i]) return false;
+    return true;
+}
+
 bool bind_is_default(int dev) {
-    return dev == BIND_DEV_PAD ? !memcmp(g_bind_pad, k_def_pad, sizeof g_bind_pad) : !memcmp(g_bind_key, k_def_key, sizeof g_bind_key);
+    return dev == BIND_DEV_PAD ? !memcmp(g_bind_pad, k_def_pad, sizeof g_bind_pad)
+                               : !memcmp(g_bind_key, k_def_key, sizeof g_bind_key) && key2_none();
 }
 
 bool bind_is_default_slot(int dev, int slot) {
-    return dev == BIND_DEV_PAD ? g_bind_pad[slot] == k_def_pad[slot] : g_bind_key[slot] == k_def_key[slot];
+    return dev == BIND_DEV_PAD ? g_bind_pad[slot] == k_def_pad[slot] : g_bind_key[slot] == k_def_key[slot] && !g_bind_key2[slot];
+}
+
+// "Keys: PC layout" (F1 > Controls, the keyboard): mouse and keyboard as most PC games have them, for Pokémon Z-A -
+// WASD, the mouse turns the camera, left click throws (ZR), right click locks on (ZL), F talks / confirms (A), Shift
+// dashes / goes back (B), Space rolls (Y), Tab the menu (X), M the map (+), P photos (-), Q / E or the wheel pick the
+// Pokémon (d-pad left / right), C crouches, V Mega Evolves, Z / X are L / R, I J K L the camera. Enter and Backspace
+// also confirm / go back. Send out / call back stay on the up / down arrows (R / G as their second keys): the game
+// draws "call back" as the send-out icon turned upside down, which only an arrow survives.
+static const struct { int8_t slot; int16_t key, key2; } k_pc[] = {
+    {BIND_A, SDL_SCANCODE_F, SDL_SCANCODE_RETURN}, {BIND_B, SDL_SCANCODE_LSHIFT, SDL_SCANCODE_BACKSPACE},
+    {BIND_X, SDL_SCANCODE_TAB, 0}, {BIND_Y, SDL_SCANCODE_SPACE, 0},
+    {BIND_LSTICK, SDL_SCANCODE_C, 0}, {BIND_RSTICK, SDL_SCANCODE_V, 0}, {BIND_L, SDL_SCANCODE_Z, 0}, {BIND_R, SDL_SCANCODE_X, 0},
+    {BIND_PLUS, SDL_SCANCODE_M, 0}, {BIND_MINUS, SDL_SCANCODE_P, 0},
+    {BIND_LEFT, SDL_SCANCODE_Q, SDL_SCANCODE_LEFT}, {BIND_UP, SDL_SCANCODE_UP, SDL_SCANCODE_R},
+    {BIND_RIGHT, SDL_SCANCODE_E, SDL_SCANCODE_RIGHT}, {BIND_DOWN, SDL_SCANCODE_DOWN, SDL_SCANCODE_G},
+    {BIND_RS_UP, SDL_SCANCODE_I, 0}, {BIND_RS_DOWN, SDL_SCANCODE_K, 0}, {BIND_RS_LEFT, SDL_SCANCODE_J, 0},
+    {BIND_RS_RIGHT, SDL_SCANCODE_L, 0},
+};
+void bind_key_pc_preset(void) {
+    memcpy(g_bind_key, k_def_key, sizeof g_bind_key);  // (the rest - WASD, ZL / ZR on 1 / 3 - as the defaults)
+    memset(g_bind_key2, 0, sizeof g_bind_key2);
+    for (size_t i = 0; i < sizeof k_pc / sizeof k_pc[0]; i++) g_bind_key[k_pc[i].slot] = k_pc[i].key, g_bind_key2[k_pc[i].slot] = k_pc[i].key2;
+    g_bind_mouse[MOUSEB_LEFT] = BIND_ZR, g_bind_mouse[MOUSEB_RIGHT] = BIND_ZL;
+    g_bind_mouse[MOUSEB_WHEEL_UP] = BIND_LEFT, g_bind_mouse[MOUSEB_WHEEL_DOWN] = BIND_RIGHT;
+    LOG("[input] keyboard: the PC layout\n");
+    result(5, BIND_DEV_KEY, -1, -1);
+}
+bool bind_key_is_pc(void) {
+    for (size_t i = 0; i < sizeof k_pc / sizeof k_pc[0]; i++)
+        if (g_bind_key[k_pc[i].slot] != k_pc[i].key || g_bind_key2[k_pc[i].slot] != k_pc[i].key2) return false;
+    return g_bind_mouse[MOUSEB_WHEEL_UP] == BIND_LEFT && g_bind_mouse[MOUSEB_WHEEL_DOWN] == BIND_RIGHT;
 }
 
 int bind_prompt_host(int slot) { return slot >= 0 && slot < BIND_PAD_COUNT ? g_bind_pad[slot] : -1; }
@@ -246,6 +285,9 @@ static void assign(int dev, int slot, int host) {
     for (int i = 0; i < n; i++)
         if (i != slot && t[i] == host) { other = i; t[i] = t[slot]; }
     t[slot] = (int16_t)host;
+    if (dev == BIND_DEV_KEY)  // (a key does one thing: off any input's second key)
+        for (int i = 0; i < BIND_KEY_COUNT; i++)
+            if (g_bind_key2[i] == host) g_bind_key2[i] = 0;
     LOG("[input] %s %s -> %s%s%s%s\n", dev == BIND_DEV_PAD ? "controller" : "keyboard", k_names[slot],
         dev == BIND_DEV_PAD ? k_pad_ini[host] : bind_key_label(host), other >= 0 ? " (swapped with " : "",
         other >= 0 ? k_names[other] : "", other >= 0 ? ")" : "");
@@ -298,6 +340,12 @@ bool bind_settings_load(const char *key, const char *val) {
             if (g_bind_mouse[m] >= BIND_PAD_COUNT) g_bind_mouse[m] = -1;  // (buttons only: not a stick direction)
         return true;
     }
+    if (!strncmp(key, "bind_key2_", 10)) {  // bind_key2_a = Return / none
+        int i = bind_slot_from_name(key + 10);
+        SDL_Scancode sc = strcmp(val, "none") ? SDL_GetScancodeFromName(val) : SDL_SCANCODE_UNKNOWN;
+        if (i >= 0 && (sc != SDL_SCANCODE_UNKNOWN || !strcmp(val, "none"))) g_bind_key2[i] = (int16_t)sc;
+        return true;
+    }
     bool pad = !strncmp(key, "bind_pad_", 9), kb = !strncmp(key, "bind_key_", 9);
     if (!pad && !kb) return false;
     for (int i = 0; i < (pad ? BIND_PAD_COUNT : BIND_KEY_COUNT); i++) {
@@ -313,6 +361,25 @@ bool bind_settings_load(const char *key, const char *val) {
     return true;
 }
 
+// After larecomp.ini is read (runtime/settings.c): a second key that would press two inputs at once - another input's
+// key, another's second key, or its own key again - or a key the overlay keeps (Escape, F1, F9-F11: they never reach
+// the game) is dropped, with a log line. (A hand-edited file can say anything; Configure inputs keeps them apart.)
+void bind_settings_done(void) {
+    static const int reserved[] = {SDL_SCANCODE_ESCAPE, SDL_SCANCODE_F1, SDL_SCANCODE_F9, SDL_SCANCODE_F10, SDL_SCANCODE_F11};
+    for (int i = 0; i < BIND_KEY_COUNT; i++) {
+        int sc = g_bind_key2[i];
+        if (!sc) continue;
+        bool bad = sc < 0 || sc >= SDL_SCANCODE_COUNT;
+        for (int r = 0; r < (int)(sizeof reserved / sizeof reserved[0]); r++) bad |= sc == reserved[r];
+        for (int j = 0; j < BIND_KEY_COUNT; j++) bad |= g_bind_key[j] == sc || (j < i && g_bind_key2[j] == sc);
+        if (bad) {
+            LOG("[input] larecomp.ini: second key %s for %s left out (that key does something else)\n",
+                sc > 0 && sc < SDL_SCANCODE_COUNT ? SDL_GetScancodeName((SDL_Scancode)sc) : "?", k_names[i]);
+            g_bind_key2[i] = 0;
+        }
+    }
+}
+
 void bind_settings_save(FILE *f) {
     for (int i = 0; i < BIND_PAD_COUNT; i++)
         if (g_bind_pad[i] != k_def_pad[i] && g_bind_pad[i] >= 0 && g_bind_pad[i] < PADB_HOST_COUNT)
@@ -320,6 +387,8 @@ void bind_settings_save(FILE *f) {
     for (int i = 0; i < BIND_KEY_COUNT; i++)
         if (g_bind_key[i] != k_def_key[i])
             fprintf(f, "bind_key_%s = %s\n", k_ini[i], g_bind_key[i] ? SDL_GetScancodeName((SDL_Scancode)g_bind_key[i]) : "none");
+    for (int i = 0; i < BIND_KEY_COUNT; i++)
+        if (g_bind_key2[i]) fprintf(f, "bind_key2_%s = %s\n", k_ini[i], SDL_GetScancodeName((SDL_Scancode)g_bind_key2[i]));
     for (int m = 0; m < MOUSEB_COUNT; m++)
         if (g_bind_mouse[m] != k_def_mouse[m])
             fprintf(f, "bind_mouse_%s = %s\n", k_mouse_ini[m], g_bind_mouse[m] >= 0 ? k_ini[g_bind_mouse[m]] : "none");

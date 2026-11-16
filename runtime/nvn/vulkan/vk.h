@@ -151,6 +151,9 @@ typedef struct {
     PFN_vkCmdSetVertexInputEXT set_vertex_input;
     // LARECOMP_VK_GPL_PROBE=1 only (exec.c gpl_probe, measurement): VK_EXT_graphics_pipeline_library enabled
     bool gpl_probe;
+    // LARECOMP_VK_PIPE_STATS=1 only (a tool): VK_KHR_pipeline_executable_properties, the driver's statistics for each
+    // pipeline built logged as [pstat] (exec.c pipe_stats_log: SIMD width, registers, spills, instructions)
+    bool pipe_stats;
     bool map_placed, unmap_reserve;  // VK_EXT_map_memory_placed: driver memory mapped at a given address (exec.c guest_heap_dmabuf)
     bool ssbo_chunks;  // stores and atomics from fragment and vertex shaders (exec.c: the heap in chunks counts misses)
     bool lazy_heap, bda;  // the heap imported chunk by chunk (device.c lazy_heap_predicted), buffer device addresses enabled for it

@@ -412,6 +412,21 @@ static const char *builtin_src(const char *name, int *stage) {
                "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
                "}\n";
     }
+    // (exec.c depth_copy_draw, with post.vert) a scaled depth copy - the game's depth pyramid - as one draw into the
+    // destination level's depth: each pixel takes the source texel vkCmdBlitImage's nearest filter takes,
+    // floor((pixel - destination origin + 0.5) * source size / destination size) from the source origin. The
+    // texel's own value, unfiltered (texelFetch). pc.r: source origin, destination origin; pc.s: the scale, the
+    // source region's last texel.
+    if (!strcmp(name, "depthcopy.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D d;\n"
+               "layout(push_constant) uniform P { ivec4 r; vec4 s; } pc;\n"
+               "void main() {\n"
+               "  ivec2 p = pc.r.xy + ivec2(floor((gl_FragCoord.xy - vec2(pc.r.zw)) * pc.s.xy));\n"
+               "  gl_FragDepth = texelFetch(d, min(p, ivec2(pc.s.zw)), 0).r;\n"
+               "}\n";
+    }
     // SMAA 1x (third_party/smaa, runtime/nvn/smaa_data.c): the reference SMAA.hlsl in its GLSL mode, High preset,
     // with an entry point per pass. a = SMAA_RT_METRICS (1 / size, size). The vertex-stage offset helpers run per
     // pixel here. Luma edges (t0 = colour) -> blending weights (t0 = edges, t1 = area, t2 = search) -> neighbourhood

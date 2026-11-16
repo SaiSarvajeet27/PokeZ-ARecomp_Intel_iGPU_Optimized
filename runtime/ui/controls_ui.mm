@@ -69,7 +69,7 @@ static int slot_cat(int slot) {
 // The right stick's snap and the mouse (runtime/hle/input.c): option rows in the page's list. (They were drawn under
 // the list with plain ImGui widgets, and the list takes the page's whole height: nobody could reach them - #44.)
 static void stick_mouse_rows() {
-    bool changed = false;
+    bool changed = false, mouse_changed = false;
     opt_section(TR("Left stick", "Analógico esquerdo"));
     {
         float dz = (float)g_settings.lstick_deadzone, outer = (float)g_settings.lstick_outer;
@@ -136,12 +136,13 @@ static void stick_mouse_rows() {
                 if (opts[i] == bind_mouse_default(m)) def = i;
             }
             static const char *const mnames[MOUSEB_COUNT][2] = {{"Left button", "Botão esquerdo"}, {"Right button", "Botão direito"},
-                {"Middle button", "Botão do meio"}, {"Back button", "Botão voltar"}, {"Forward button", "Botão avançar"}};
+                {"Middle button", "Botão do meio"}, {"Back button", "Botão voltar"}, {"Forward button", "Botão avançar"},
+                {"Wheel up", "Roda para cima"}, {"Wheel down", "Roda para baixo"}};
             if (opt_choice(TR(mnames[m][0], mnames[m][1]), &cur, names, NOPT, def,
                            TR("The Switch button this mouse button presses (Camera: Always).",
                               "O botão do Switch que este botão do mouse aperta (Câmera: Sempre)."))) {
                 g_bind_mouse[m] = (int16_t)opts[cur];
-                changed = true;
+                changed = mouse_changed = true;
             }
         }
         if (!bind_mouse_is_default() &&
@@ -149,10 +150,11 @@ static void stick_mouse_rows() {
                        TR("The left button presses ZR, the right one ZL, the others nothing.",
                           "O botão esquerdo aperta ZR, o direito ZL, os outros nada."))) {
             bind_mouse_reset();
-            changed = true;
+            changed = mouse_changed = true;
         }
     }
     if (changed) settings_save();
+    if (mouse_changed) launcher_prompts_refresh();  // (an input on a mouse button: its icons show the mouse)
 }
 
 // Devices: each connected controller by name (they share one set of bindings; the name picks the button names), or
@@ -303,6 +305,20 @@ static void configure_inputs(float scale) {
             bind_capture_cancel();
             bind_pad_face_preset(true);
         }
+    } else {
+        if (bind_key_is_pc()) opt_disable_next();
+        if (opt_action(TR("Keys: PC layout", "Teclas: layout de PC"), "",
+                       TR("Mouse and keyboard as most PC games have them: WASD, the mouse turns the camera, left click "
+                          "throws, right click locks on, F talks (or Enter), Shift dashes and goes back (or Backspace), "
+                          "Space rolls, Tab the menu, M the map, Q / E or the wheel pick the Pokemon, the up / down "
+                          "arrows (or R / G) send it out and call it back, C crouches, V Mega Evolves.",
+                          "Mouse e teclado como na maioria dos jogos de PC: WASD, o mouse gira a câmera, clique esquerdo "
+                          "arremessa, clique direito trava a mira, F fala (ou Enter), Shift corre e volta (ou Backspace), "
+                          "Espaço rola, Tab o menu, M o mapa, Q / E ou a roda escolhem o Pokémon, as setas para cima / "
+                          "baixo (ou R / G) chamam e recolhem, C agacha, V megaevolui."))) {
+            bind_capture_cancel();
+            bind_key_pc_preset();
+        }
     }
     // (the cursor or the mouse on a row with a description: it shows on the right instead of the bindings)
     bool desc_right = (ImGui::IsItemHovered() || nav_on_item()) && g_focus != FOCUS_RIGHT;
@@ -322,6 +338,8 @@ static void configure_inputs(float scale) {
             char val[64];
             if (waiting) snprintf(val, sizeof val, "%s...  %d", g_dev_pad ? TR("Press a button", "Aperte um botão")
                                                                           : TR("Press a key", "Aperte uma tecla"), (ms + 999) / 1000);
+            else if (!g_dev_pad && g_bind_key2[b.slot])  // (a second key, larecomp.ini / the PC layout: "F / Return")
+                snprintf(val, sizeof val, "%s / %s", bind_key_label(g_bind_key[b.slot]), bind_key_label(g_bind_key2[b.slot]));
             else snprintf(val, sizeof val, "%s", g_dev_pad ? bind_pad_label(g_bind_pad[b.slot], fam) : bind_key_label(g_bind_key[b.slot]));
             // the same button / key on two inputs (a hand-edited larecomp.ini): red
             const int16_t *t = g_dev_pad ? g_bind_pad : g_bind_key;

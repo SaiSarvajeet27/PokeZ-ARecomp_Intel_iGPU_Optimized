@@ -28,9 +28,13 @@ enum { PADB_LTRIGGER = 26 /* SDL_GAMEPAD_BUTTON_COUNT */, PADB_RTRIGGER, PADB_HO
 
 extern int16_t g_bind_pad[BIND_PAD_COUNT];  // PADB value per Switch button
 extern int16_t g_bind_key[BIND_KEY_COUNT];  // SDL_Scancode per input (0 = none)
+// A second key per input (0 = none, the default): PC games' "alternate" key - Enter as well as the confirm key, say.
+// larecomp.ini only (bind_key2_<input>); a key captured in Configure inputs leaves the second keys it was on.
+extern int16_t g_bind_key2[BIND_KEY_COUNT];
 // Mouse buttons -> Switch button (BIND_A..BIND_DOWN, -1 none): the other way round from the tables above, so a mouse
 // button adds to the keyboard's key instead of taking its place. Only while the mouse camera holds the cursor.
-enum { MOUSEB_LEFT, MOUSEB_RIGHT, MOUSEB_MIDDLE, MOUSEB_X1, MOUSEB_X2, MOUSEB_COUNT };
+// The wheel's two directions are two more: each notch one short press (runtime/hle/input.c).
+enum { MOUSEB_LEFT, MOUSEB_RIGHT, MOUSEB_MIDDLE, MOUSEB_X1, MOUSEB_X2, MOUSEB_WHEEL_UP, MOUSEB_WHEEL_DOWN, MOUSEB_COUNT };
 extern int16_t g_bind_mouse[MOUSEB_COUNT];
 const char *bind_mouse_name(int mb);           // "Left button"
 int bind_mouse_from_sdl(int sdl_button);       // SDL_BUTTON_* -> MOUSEB_* (-1: another button)
@@ -49,6 +53,8 @@ void bind_reset(int dev);
 void bind_pad_face_preset(bool xbox_letters);  // A/B/X/Y: Nintendo positions (A east) or Xbox letters (A south), #178
 bool bind_pad_face_is(bool xbox_letters);
 void bind_pad_first_start(void);  // a first start with an Xbox / PlayStation pad: the Xbox-letters preset, once (#241)
+void bind_key_pc_preset(void);  // the keyboard and mouse as most PC games have them (F1 > Controls)
+bool bind_key_is_pc(void);
 bool bind_is_default(int dev);
 bool bind_is_default_slot(int dev, int slot);
 
@@ -66,6 +72,7 @@ int bind_last_result(int *dev, int *slot, int *other, int *serial);
 
 // larecomp.ini: bind_pad_<input> / bind_key_<input> (only the ones that differ from the defaults are written)
 bool bind_settings_load(const char *key, const char *val);
+void bind_settings_done(void);  // after the file: second keys that clash left out
 void bind_settings_save(FILE *f);
 
 // bind_* names (larecomp.ini): Switch input "a", "zl", "ls_up"... -> slot; controller button "south"... -> PADB value

@@ -181,16 +181,19 @@ static bool host_test;  // (then a real controller is left out: the player's own
 
 static int held_key(int sc) { return sc > 0 && sc < SDL_SCANCODE_COUNT && (keys_down[sc] || test_keys[sc]); }
 
+// an input's key or its second key (g_bind_key2) held
+static int held_slot(int i) { return held_key(g_bind_key[i]) || held_key(g_bind_key2[i]); }
+
 // Through the bindings (runtime/hle/bindings.c: g_bind_key), read on every key event, so a rebind applies at once.
 static void recompute_keyboard(void) {
     uint64_t b = 0;
     for (int i = 0; i < BIND_PAD_COUNT; i++)
-        if (held_key(g_bind_key[i])) b |= 1ull << i;
+        if (held_slot(i)) b |= 1ull << i;
     key_buttons = b;
-    key_lx = (held_key(g_bind_key[BIND_LS_RIGHT]) - held_key(g_bind_key[BIND_LS_LEFT])) * 32767;
-    key_ly = (held_key(g_bind_key[BIND_LS_UP]) - held_key(g_bind_key[BIND_LS_DOWN])) * 32767;
-    key_rx = (held_key(g_bind_key[BIND_RS_RIGHT]) - held_key(g_bind_key[BIND_RS_LEFT])) * 32767;
-    key_ry = (held_key(g_bind_key[BIND_RS_UP]) - held_key(g_bind_key[BIND_RS_DOWN])) * 32767;
+    key_lx = (held_slot(BIND_LS_RIGHT) - held_slot(BIND_LS_LEFT)) * 32767;
+    key_ly = (held_slot(BIND_LS_UP) - held_slot(BIND_LS_DOWN)) * 32767;
+    key_rx = (held_slot(BIND_RS_RIGHT) - held_slot(BIND_RS_LEFT)) * 32767;
+    key_ry = (held_slot(BIND_RS_UP) - held_slot(BIND_RS_DOWN)) * 32767;
 }
 
 // Controller buttons (and the triggers as buttons) -> Switch buttons through g_bind_pad; the sticks stay the sticks.
@@ -304,6 +307,7 @@ static bool test_event(const SDL_Event *e) {
     case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP: return e->gbutton.which == TEST_DEVICE;
     case SDL_EVENT_MOUSE_MOTION: return e->motion.which == TEST_DEVICE;
     case SDL_EVENT_MOUSE_BUTTON_DOWN: case SDL_EVENT_MOUSE_BUTTON_UP: return e->button.which == TEST_DEVICE;
+    case SDL_EVENT_MOUSE_WHEEL: return e->wheel.which == TEST_DEVICE;
     default: return false;
     }
 }
@@ -457,6 +461,11 @@ static void mouse_stick(int32_t *rx, int32_t *ry) {
 static _Atomic bool mouse_held;
 static _Atomic uint64_t mouse_buttons;
 static uint8_t mouse_down[MOUSEB_COUNT];
+// The wheel (g_bind_mouse[MOUSEB_WHEEL_UP / DOWN]): each notch one press of its button, a presented frame long, with a
+// frame released before the next (the game acts on a press's edge: a wheel turned fast is still one step a notch). The
+// UI thread counts notches (a touchpad's fractions add up to one); the game's poll gives them out (fill_state).
+static _Atomic int wheel_pending[2];  // notches up / down not yet given to the game
+static float wheel_acc;
 static void recompute_mouse(void) {
     uint64_t b = 0;
     for (int m = 0; m < MOUSEB_COUNT; m++)
@@ -609,6 +618,15 @@ void input_handle_event(const SDL_Event *e) {
         recompute_mouse();
         break;
     }
+    case SDL_EVENT_MOUSE_WHEEL: {  // (only while the cursor is held, as the buttons; a test's notches always)
+        if (!mouse_held && e->wheel.which != TEST_DEVICE) { wheel_acc = 0; break; }
+        float y = e->wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -e->wheel.y : e->wheel.y;
+        if ((y > 0 && wheel_acc < 0) || (y < 0 && wheel_acc > 0)) wheel_acc = 0;  // (turned back: start over)
+        wheel_acc += y;
+        for (; wheel_acc >= 1; wheel_acc -= 1) if (wheel_pending[0] < 4) wheel_pending[0]++;
+        for (; wheel_acc <= -1; wheel_acc += 1) if (wheel_pending[1] < 4) wheel_pending[1]++;
+        break;
+    }
     case SDL_EVENT_MOUSE_MOTION:  // the mouse turns the camera (right stick): cursor held, or the right button held
         // (the cursor free while the game plays - hold, or a tool's panels beside the game: the right button held turns it)
         if (mouse_held || (g_settings.mouse_camera != MOUSE_CAM_OFF && !menu_input_captured() && (e->motion.state & SDL_BUTTON_RMASK))) {
@@ -669,7 +687,8 @@ static void record_input(uint64_t frame, uint64_t b, const int32_t st_[4]) {
 //   entry first like a player's typing; "{Escape}" (any SDL key name) presses that key. No ',' or ':' in <text>.
 // "frame:sdlpad:<button>:frames" / "frame:sdlkey:<key>:frames" hold a controller button / key as real events (down
 //   at frame, up `frames` later): they reach menus and the on-screen keyboard first, as a player's would.
-// "frame:mouse:<dx>/<dy>" moves the mouse by that many points, "frame:mouse:click" clicks it (real events).
+// "frame:mouse:<dx>/<dy>" moves the mouse by that many points, "frame:mouse:click" clicks it (real events);
+//   "frame:mouse:wheel_up" / "wheel_down" turns the wheel a notch.
 // "frame:shot:<name>" saves the window (game + menus) to build/<name>.png.
 // "frame:resize:<W>x<H>" resizes the window to W x H points (menu_apply_window_requests: the main thread).
 // LARECOMP_BIND_TEST="frame:pad|key:<input>:<host>,..." starts a rebind capture of <input> (bind_* name: a, zl,
@@ -710,6 +729,10 @@ static void test_push(uint64_t frame, unsigned long start, unsigned long len, co
             e.button.x = mx, e.button.y = my;
             SDL_PushEvent(&e);
             e.type = SDL_EVENT_MOUSE_BUTTON_UP, e.button.down = false;
+        } else if (!strncmp(arg, "wheel_", 6)) {
+            e.type = SDL_EVENT_MOUSE_WHEEL;
+            e.wheel.which = TEST_DEVICE, e.wheel.y = !strcmp(arg + 6, "up") ? 1.0f : -1.0f;
+            e.wheel.direction = SDL_MOUSEWHEEL_NORMAL, e.wheel.mouse_x = mx, e.wheel.mouse_y = my;
         } else {
             sscanf(arg, "%f/%f", &dx, &dy);
             e.type = SDL_EVENT_MOUSE_MOTION;
@@ -1090,7 +1113,24 @@ static void fill_state(Cpu *c) {
             if (getenv("LARECOMP_INPUT")) LOG("[input] short press %#llx\n", (unsigned long long)t);
         } else if (f > tap_frame) tap = 0;
     }
-    uint64_t b = menu ? script_buttons : held | tap | script_buttons;
+    static uint64_t wheel_on;  // (the wheel's press now: a notch, one presented frame on, then one off)
+    {
+        extern uint64_t renderer_present_count(void);
+        static uint64_t wheel_frame;
+        uint64_t f = renderer_present_count();
+        if (f != wheel_frame) {
+            wheel_frame = f;
+            if (wheel_on) wheel_on = 0;
+            else for (int d = 0; d < 2; d++) {
+                int s = g_bind_mouse[MOUSEB_WHEEL_UP + d];
+                if (wheel_pending[d] > 0) {
+                    atomic_fetch_sub(&wheel_pending[d], 1);
+                    if (s >= 0 && s < BIND_PAD_COUNT) wheel_on |= 1ull << s;
+                }
+            }
+        }
+    }
+    uint64_t b = menu ? script_buttons : held | tap | wheel_on | script_buttons;
     {   // injected Plus: held for ~10 presented frames (the game polls several times per frame)
         extern uint64_t renderer_present_count(void);
         static uint64_t until;

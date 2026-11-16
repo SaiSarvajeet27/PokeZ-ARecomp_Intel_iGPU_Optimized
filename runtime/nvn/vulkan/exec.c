@@ -573,8 +573,9 @@ static void gw_explain(uint64_t pa) {
     LOG("\n");
 }
 
-static char gp_label[512][112];
-static uint32_t gp_draws[512];
+#define GP_MAX 4096  // (marks a profiled frame can hold: a row per draw with LARECOMP_GPUPROF_DRAWS takes ~1500 outdoors)
+static char gp_label[GP_MAX][112];
+static uint32_t gp_draws[GP_MAX];
 // LARECOMP_VK_DEVLOST_TRACE=1: the last 64 GPU operations, dumped on device loss (with LARECOMP_SYNC_SUBMIT=1 the
 // dump ends with the command list that faulted).
 #define DL_N 4096  // (a power of two)
@@ -627,12 +628,12 @@ void vk_devlost_dump(void) {
         }
 }
 static void gp_mark(VkCommandBuffer cb, const char *fmt, ...) {
-    if (!g_gpuprof_frame || gp_n >= 511) return;
+    if (!g_gpuprof_frame || gp_n >= GP_MAX - 1) return;
     if (!gp_qp) {
-        VkQueryPoolCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 512};
+        VkQueryPoolCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = GP_MAX};
         if (vkCreateQueryPool(g_vk.dev, &qi, NULL, &gp_qp) != VK_SUCCESS) { g_gpuprof_frame = false; return; }
     }
-    if (!gp_n) rec_CmdResetQueryPool(cb, gp_qp, 0, 512);
+    if (!gp_n) rec_CmdResetQueryPool(cb, gp_qp, 0, GP_MAX);
     rec_CmdWriteTimestamp2(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, gp_qp, (uint32_t)gp_n);
     va_list ap;
     va_start(ap, fmt);
@@ -645,7 +646,7 @@ void renderer_flush(void);
 void vk_gpuprof_report(void) {
     if (!gp_n) return;
     renderer_flush();
-    uint64_t t[512];
+    static uint64_t t[GP_MAX];
     if (vkGetQueryPoolResults(g_vk.dev, gp_qp, 0, (uint32_t)gp_n, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) == VK_SUCCESS) {
         double per = g_vk.props.limits.timestampPeriod / 1e6, total = (t[gp_n - 1] - t[0]) * per;
         LOG("[gpuprof] %d marks, %.2f ms first to last (rows: the work after each mark, until the next)\n", gp_n, total);
@@ -1441,7 +1442,9 @@ void vk_exec_init(void) {
     }
     extern bool maxwell_quad_control_ok, maxwell_quad_control_default;
     maxwell_quad_control_ok = g_vk.quad_control;  // (translate.c quad_control_on: full quads where the game derives itself)
-    maxwell_quad_control_default = g_vk.quad_control && g_vk.props.vendorID == 0x1002;
+    // (Intel too: without it the eyes' iris came out as magenta noise on a UHD Graphics with driver 101.7092, which has
+    // both extensions; with it the eyes are right)
+    maxwell_quad_control_default = g_vk.quad_control && (g_vk.props.vendorID == 0x1002 || g_vk.props.vendorID == 0x8086);
     {
         const char *qc = getenv("LARECOMP_SHADER_QUAD_CONTROL");
         bool qc_on = g_vk.quad_control && (qc ? atoi(qc) != 0 : maxwell_quad_control_default);  // (as translate.c decides)
@@ -1974,10 +1977,13 @@ static void begin_pass(void) {
     // A pass with depth / stencil but no color attachment gets a throwaway one on Intel (LARECOMP_VK_PLACEHOLDER_COLOR=0 /
     // 1 overrides): the UHD 630's Windows driver (Vulkan 1.3.215) crashes in the vkCmdBeginRendering after such a pass,
     // reading near a null pointer (issues #8, #46). Pipelines and clears follow pass_ncolor / pass_color as usual.
+    // Only those drivers (before Vulkan 1.3.216, device.c): the placeholder isn't free - the depth-only passes' fragment
+    // shaders then write a colour target too, so the GPU can't skip them (Z-A's shadow / depth passes, ~130 draws a
+    // frame: UHD Graphics, driver 101.7092, native 1080p 25.7 -> 27.2 fps without it, the same image)
     static int placeholder = -1;
     if (placeholder < 0) {
         const char *e = getenv("LARECOMP_VK_PLACEHOLDER_COLOR");
-        placeholder = e ? atoi(e) != 0 : g_vk.props.vendorID == 0x8086;
+        placeholder = e ? atoi(e) != 0 : g_vk.props.vendorID == 0x8086 && g_vk.props.apiVersion < VK_MAKE_API_VERSION(0, 1, 3, 216);
     }
     bool placed = false;
     // The same driver on an Iris Xe (Vulkan 1.3.212) crashed there on an empty slot before a bound one ("empty color
@@ -2418,6 +2424,28 @@ static bool spirv_strip_early_tests(uint32_t *w, size_t *nwords) {
     return false;
 }
 
+// LARECOMP_GLSL_OVERRIDE=<folder> (a tool, for shader experiments): a translated shader whose file is in that folder -
+// <hash>.vert / <hash>.frag, as LARECOMP_DUMP_GLSL names them without the code address, or <code address>.comp - is
+// replaced by the file's text
+static void glsl_override(ShaderInfo *si, const char *name) {
+    const char *dir = ENV("LARECOMP_GLSL_OVERRIDE");
+    if (!dir || !si || !si->msl) return;
+    char path[512];
+    snprintf(path, sizeof path, "%s/%s", dir, name);
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *s = malloc(n + 1);
+    if (s && fread(s, 1, n, f) == (size_t)n) {
+        s[n] = 0;
+        si->msl = s;  // (the translator's text is left: a tool)
+        LOG("[shader] %s: GLSL from %s\n", name, path);
+    } else free(s);
+    fclose(f);
+}
+
 static void compile_program(void *arg) {
     Prog *p = arg;
     uint64_t t0 = SDL_GetTicksNS();
@@ -2507,13 +2535,22 @@ static bool translate_program_now(Prog *p) {
         p->fi = p->code[1] ? maxwell_translate((const uint8_t *)(uintptr_t)p->code[1], p->cmax[1], STAGE_FRAGMENT, &p->fkey)
                            : maxwell_empty_fragment();
     }
+    if (ENV("LARECOMP_GLSL_OVERRIDE"))
+        for (int sg = 0; sg < 2; sg++)
+            if (p->code[sg]) {
+                char nm[64];
+                snprintf(nm, sizeof nm, "%016llx.%s", (unsigned long long)p->hash[sg], sg ? "frag" : "vert");
+                glsl_override(sg ? p->fi : p->vi, nm);
+            }
     if (ENV("LARECOMP_DUMP_GLSL")) {  // (debug) build/glsl/<code address>.{vert,frag}[.asm]: source and disassembly
         mkdir("build/glsl", 0755);
         for (int sg = 0; sg < 2; sg++) {
             ShaderInfo *si = sg ? p->fi : p->vi;
             if (!p->code[sg]) continue;
             char path[96];
-            snprintf(path, sizeof path, "build/glsl/%llx.%s", (unsigned long long)p->code[sg], sg ? "frag" : "vert");
+            // (named by code hash too: the hash [gpuprof] rows and [ct] lines give)
+            snprintf(path, sizeof path, "build/glsl/%016llx.%llx.%s", (unsigned long long)p->hash[sg], (unsigned long long)p->code[sg],
+                     sg ? "frag" : "vert");
             FILE *f = fopen(path, "wb");
             if (f) { if (si && si->msl) fputs(si->msl, f); fclose(f); }
             strcat(path, ".asm");
@@ -3246,6 +3283,63 @@ static void pipe_ci_fill(PipeCI *c, const PipeKey *k) {
                                            .pDynamicState = &c->dy, .layout = k->prog->layout};
 }
 
+// LARECOMP_VK_PIPE_STATS=1 (a tool, g_vk.pipe_stats): what the driver's compiler made of a pipeline, one [pstat] line per
+// executable (stage): its SIMD width, registers, spills, instruction counts - as the driver names them
+static void pipe_stats_log(VkPipeline pipe, uint64_t vs, uint64_t fs) {
+    static PFN_vkGetPipelineExecutablePropertiesKHR props;
+    static PFN_vkGetPipelineExecutableStatisticsKHR stats;
+    if (!props) props = (PFN_vkGetPipelineExecutablePropertiesKHR)vkGetDeviceProcAddr(g_vk.dev, "vkGetPipelineExecutablePropertiesKHR");
+    if (!stats) stats = (PFN_vkGetPipelineExecutableStatisticsKHR)vkGetDeviceProcAddr(g_vk.dev, "vkGetPipelineExecutableStatisticsKHR");
+    if (!props || !stats || !pipe) return;
+    VkPipelineInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INFO_KHR, .pipeline = pipe};
+    VkPipelineExecutablePropertiesKHR ep[8];
+    uint32_t ne = 8;
+    for (uint32_t i = 0; i < 8; i++) ep[i] = (VkPipelineExecutablePropertiesKHR){.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_PROPERTIES_KHR};
+    if (props(g_vk.dev, &pi, &ne, ep) < 0) return;
+    for (uint32_t i = 0; i < ne; i++) {
+        VkPipelineExecutableInfoKHR ei = {.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR, .pipeline = pipe, .executableIndex = i};
+        VkPipelineExecutableStatisticKHR st[32];
+        uint32_t ns = 32;
+        for (uint32_t j = 0; j < 32; j++) st[j] = (VkPipelineExecutableStatisticKHR){.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_STATISTIC_KHR};
+        if (stats(g_vk.dev, &ei, &ns, st) < 0) ns = 0;
+        char line[1536];
+        int n = snprintf(line, sizeof line, "[pstat] vs %016llx fs %016llx %s (subgroup %u):", (unsigned long long)vs,
+                         (unsigned long long)fs, ep[i].name, ep[i].subgroupSize);
+        for (uint32_t j = 0; j < ns && n < (int)sizeof line - 80; j++) {
+            const VkPipelineExecutableStatisticKHR *x = &st[j];
+            if (x->format == VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_BOOL32_KHR) n += snprintf(line + n, sizeof line - n, " %s=%u", x->name, x->value.b32);
+            else if (x->format == VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR) n += snprintf(line + n, sizeof line - n, " %s=%lld", x->name, (long long)x->value.i64);
+            else if (x->format == VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR) n += snprintf(line + n, sizeof line - n, " %s=%llu", x->name, (unsigned long long)x->value.u64);
+            else n += snprintf(line + n, sizeof line - n, " %s=%.3f", x->name, x->value.f64);
+        }
+        LOG("%s\n", line);
+    }
+    // LARECOMP_VK_PIPE_IR=<fs hash, hex>: that pipeline's internal representations (the driver's ISA, when it gives them)
+    // written to build/pipe_ir/<vs>.<fs>.<executable>.<n>.txt
+    const char *want = ENV("LARECOMP_VK_PIPE_IR");
+    static PFN_vkGetPipelineExecutableInternalRepresentationsKHR irs;
+    if (!want || strtoull(want, NULL, 16) != fs) return;
+    if (!irs) irs = (PFN_vkGetPipelineExecutableInternalRepresentationsKHR)vkGetDeviceProcAddr(g_vk.dev, "vkGetPipelineExecutableInternalRepresentationsKHR");
+    if (!irs) return;
+    for (uint32_t i = 0; i < ne; i++) {
+        VkPipelineExecutableInfoKHR ei = {.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR, .pipeline = pipe, .executableIndex = i};
+        VkPipelineExecutableInternalRepresentationKHR r[8];
+        uint32_t nr = 8;
+        for (uint32_t j = 0; j < 8; j++) r[j] = (VkPipelineExecutableInternalRepresentationKHR){.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INTERNAL_REPRESENTATION_KHR};
+        if (irs(g_vk.dev, &ei, &nr, r) < 0) { LOG("[pstat] no internal representations\n"); return; }
+        for (uint32_t j = 0; j < nr; j++) r[j].pData = calloc(1, r[j].dataSize + 1);
+        irs(g_vk.dev, &ei, &nr, r);
+        for (uint32_t j = 0; j < nr; j++) {
+            char path[256];
+            snprintf(path, sizeof path, "build/pipe_ir/%016llx.%016llx.%u.%u.txt", (unsigned long long)vs, (unsigned long long)fs, i, j);
+            FILE *f = fopen(path, "wb");
+            if (f) fwrite(r[j].pData, 1, r[j].dataSize, f), fclose(f);
+            LOG("[pstat] %s: %s (%s, %zu bytes, text %u)\n", path, r[j].name, r[j].description, r[j].dataSize, r[j].isText);
+            free(r[j].pData);
+        }
+    }
+}
+
 static void build_pipeline(void *arg) {
     Pipe *pp = arg;
     PipeKey *k = &pp->k;
@@ -3264,6 +3358,8 @@ static void build_pipeline(void *arg) {
     extern bool g_vk_no_opt;  // (device.c vk_bad_code_note: this driver's optimizer gave the GPU invalid instructions)
     extern __thread uint64_t t_build_vs, t_build_fs;
     if (g_vk_no_opt) c.pi.flags |= VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
+    if (g_vk.pipe_stats) c.pi.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR |
+                                       (ENV("LARECOMP_VK_PIPE_IR") ? VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR : 0);
     t_build_vs = k->prog->hash[0], t_build_fs = k->prog->hash[1];
     t_build_state = &pp->state, t_build_slot = bs;
     {   // (test) LARECOMP_TEST_COMPILE_CRASH=<n>: the n-th pipeline fails as a compiler crash would
@@ -3277,6 +3373,7 @@ static void build_pipeline(void *arg) {
     }
     VkResult r = vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &c.pi, NULL, &pp->pipe);
     t_build_vs = t_build_fs = 0;
+    if (g_vk.pipe_stats && r == VK_SUCCESS) pipe_stats_log(pp->pipe, k->prog->hash[0], k->prog->hash[1]);
     t_build_state = NULL;
     SLOW_FEEDBACK_HIT();
     build_end(bs);
@@ -3433,6 +3530,10 @@ static void ct_draw(Prog *pr, const char *what) {
     LOG("[ct] %s fs %016llx rt", what, (unsigned long long)g_cur_fs_hash);
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) LOG(" c%d=%p/%#x", i, (void *)st.rt.color[i], st.rt.color[i]->format);
     if (st.rt.depth) LOG(" d=%p/%#x%s", (void *)st.rt.depth, st.rt.depth->format, st.ds[0] && st.ds[1] ? "W" : "");
+    // (depth / stencil state: test, write, func, stencil on, funcs, ops front / back, masks, ref; cull; fs discard)
+    LOG(" ds %u%u%u st %u f%02x op %02x%02x%02x m%02x/%02x r%02x cull %u%s", st.ds[0], st.ds[1], st.ds[2], st.ds[3], st.ds[4], st.ds[5],
+        st.ds[6], st.ds[7], st.stencil_vmask[0] & 0xFF, st.stencil_mask[0] & 0xFF, st.stencil_ref[0] & 0xFF, st.poly[0],
+        pr->fi && pr->fi->uses_discard ? " discard" : "");
     LOG(" cm %08x vp %.0f %.0f %.0f %.0f sc %d %d %d %d | tex", st.channel_mask, st.viewport[0][0], st.viewport[0][1], st.viewport[0][2],
         st.viewport[0][3], st.scissor[0][0], st.scissor[0][1], st.scissor[0][2], st.scissor[0][3]);
     ShaderInfo *infos[2] = {pr->vi, pr->fi};
@@ -3890,8 +3991,12 @@ static void resolve_feedback(Prog *pr) {
                 }
             }
             gp_mark(cb, "feedback snapshot %ux%u fmt %d (copied %ux%u)", src->width, src->height, src->format, cw, ch);
-            VkImageCopy rg = {.srcSubresource = {src->aspect, 0, 0, 1}, .dstSubresource = {src->aspect, 0, 0, 1},
-                              .extent = {cw, ch, 1}};
+            // (only the aspect the snapshot is read as - sa, as its view below: a depth + stencil target's stencil was
+            // copied along, a fifth more bytes, and never read. LARECOMP_SNAP_ALL_ASPECTS=1: every aspect, as before)
+            static int all_aspects = -1;
+            if (all_aspects < 0) all_aspects = ENV("LARECOMP_SNAP_ALL_ASPECTS") && atoi(ENV("LARECOMP_SNAP_ALL_ASPECTS"));
+            VkImageAspectFlags ca = all_aspects ? src->aspect : sa;
+            VkImageCopy rg = {.srcSubresource = {ca, 0, 0, 1}, .dstSubresource = {ca, 0, 0, 1}, .extent = {cw, ch, 1}};
             rec_CmdCopyImage(cb, src->image, VK_IMAGE_LAYOUT_GENERAL, dst->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
             if (g_debug_frame && (src->aspect & VK_IMAGE_ASPECT_DEPTH_BIT)) {
                 static int nd;
@@ -6963,6 +7068,11 @@ static bool translate_compute(CsProg *cp, const uint8_t *code, size_t max, uint6
     uint32_t smax = g_vk.props.limits.maxComputeSharedMemorySize;
     maxwell_shared_bytes = cp->shared ? cp->shared : smax < 0xC000 ? smax : 0xC000;
     cp->si = maxwell_translate(code, max, STAGE_COMPUTE, &k);
+    if (ENV("LARECOMP_GLSL_OVERRIDE")) {
+        char nm[64];
+        snprintf(nm, sizeof nm, "%llx.comp", (unsigned long long)addr);
+        glsl_override(cp->si, nm);
+    }
     if (ENV("LARECOMP_DUMP_GLSL")) {  // (debug) build/glsl/<code address>.comp
         mkdir("build/glsl", 0755);
         char path[96];
@@ -8226,8 +8336,7 @@ static void draw_(CmdRec *r, bool indexed) {
             VkStencilFaceFlags face = f ? VK_STENCIL_FACE_BACK_BIT : VK_STENCIL_FACE_FRONT_BIT;
             uint32_t v[7] = {fx.sop[f][0], fx.sop[f][1], fx.sop[f][2], fx.sop[f][3], st.stencil_vmask[f] & 0xFF,
                              st.stencil_mask[f] & 0xFF, st.stencil_ref[f]};
-            if (!sten) memcpy(v, (uint32_t[7]){VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_COMPARE_OP_ALWAYS, 0xFF, 0xFF, 0}, sizeof v);
-            if (!ss_need(f ? SS_SFACE1 : SS_SFACE0, !memcmp(v, ss.sface[f], sizeof v))) continue;
+            if (!sten) memcpy(v, (uint32_t[7]){VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_COMPARE_OP_ALWAYS, 0xFF, 0xFF, 0}, sizeof v);            if (!ss_need(f ? SS_SFACE1 : SS_SFACE0, !memcmp(v, ss.sface[f], sizeof v))) continue;
             memcpy(ss.sface[f], v, sizeof v);
             rec_CmdSetStencilOp(cb, face, (VkStencilOp)v[0], (VkStencilOp)v[1], (VkStencilOp)v[2], (VkCompareOp)v[3]);
             rec_CmdSetStencilCompareMask(cb, face, v[4]);
@@ -8616,6 +8725,13 @@ static void draw_(CmdRec *r, bool indexed) {
         planar_capture(pr, pp, vl.used_streams, sets, ndyn, dyn, nv_dyn, gc_shift && (pr->vi->uses_gmem || pr->fi->uses_gmem), &pl_dc);
     if (nruns == 1 && !raster_discard)  // (the characters' draws, kept to be drawn again into the motion vectors)
         objmv_capture(pr, pp, vl.used_streams, sets, ndyn, dyn, nv_dyn, gc_shift && (pr->vi->uses_gmem || pr->fi->uses_gmem), &pl_dc);
+    {   // LARECOMP_GPUPROF_DRAWS=1 (with LARECOMP_GPUPROF_AT): a row per draw in the profiled frame, inside its pass
+        static int per_draw = -1;
+        if (per_draw < 0) per_draw = ENV("LARECOMP_GPUPROF_DRAWS") && atoi(ENV("LARECOMP_GPUPROF_DRAWS"));
+        if (g_gpuprof_frame && per_draw)
+            gp_mark(cb, "  draw vs %016llx fs %016llx %s %u x%u%s", (unsigned long long)pr->hash[0], (unsigned long long)pr->hash[1],
+                    use_index ? "indices" : "vertices", use_index ? icount : count, inst, raster_discard ? " (no raster)" : "");
+    }
     for (int ri = 0; ri < nruns; ri++) {
         if (nruns > 1 || run_gold[0]) {  // this run's tint: a fragment set of its own
             float rtint[RECOLOUR_TINT_FLOATS] = {0};
@@ -9673,6 +9789,112 @@ static void depth_blit_via_color(VkCommandBuffer cb, TexBackend *s, TexBackend *
     rec_CmdCopyBufferToImage(cb, buf, d->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
 }
 
+// The same copy as one draw (false: not done, depth_blit_via_color does it): the source level's depth aspect sampled
+// texel by texel, written as the depth of the destination region (shaders.c depthcopy.frag: the texel the blit's
+// nearest filter picks, its bits unchanged - a float depth written back as it was read). Depth test on with ALWAYS,
+// so only depth is written; a combined image's stencil is loaded and stored as it was, as the transfers left it.
+// depth_blit_via_color is five transfers with a full barrier between each, through a buffer and two colour images:
+// on Intel's UHD Graphics (driver 101.7092) Z-A's three scaled depth copies a frame (1080p -> 960x540 twice, 480x270)
+// took ~5.5 ms of a ~37 ms frame at native 1080p. Not on the Intel drivers that crash after a pass without a colour
+// attachment (begin_pass's placeholder). LARECOMP_VK_DEPTH_COPY_DRAW=0: the transfers always, 1: the draw always.
+static bool depth_copy_draw(VkCommandBuffer cb, TexBackend *s, TexBackend *d, uint32_t slv, uint32_t sly, int sx, int sy,
+                            int sw, int sh, uint32_t dlv, uint32_t dly, int dx, int dy, int dw, int dh) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("LARECOMP_VK_DEPTH_COPY_DRAW");
+        on = e ? atoi(e) != 0 : !(g_vk.props.vendorID == 0x8086 && g_vk.props.apiVersion < VK_MAKE_API_VERSION(0, 1, 3, 216));
+        LOG("[vk] scaled depth copies without depth blits: %s (LARECOMP_VK_DEPTH_COPY_DRAW)\n", on ? "a draw each" : "transfers");
+    }
+    if (!on || s->samples != 1 || d->samples != 1 || !(s->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) || !(d->aspect & VK_IMAGE_ASPECT_DEPTH_BIT))
+        return false;
+    static VkDescriptorSetLayout dsl;
+    static VkPipelineLayout layout;
+    static struct { VkFormat f; bool stencil; VkPipeline p; } pipes[8];  // (per destination format; VK_NULL_HANDLE: failed)
+    static int npipes;
+    if (!layout) {
+        VkDescriptorSetLayoutBinding b = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
+        VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &b};
+        VK_CHECK(vkCreateDescriptorSetLayout(g_vk.dev, &li, NULL, &dsl));
+        VkPushConstantRange r = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32};
+        VkPipelineLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &dsl,
+                                         .pushConstantRangeCount = 1, .pPushConstantRanges = &r};
+        VK_CHECK(vkCreatePipelineLayout(g_vk.dev, &ci, NULL, &layout));
+    }
+    bool stencil = (d->aspect & VK_IMAGE_ASPECT_STENCIL_BIT) != 0;
+    int pi_ = -1;
+    for (int i = 0; i < npipes; i++) if (pipes[i].f == d->format && pipes[i].stencil == stencil) pi_ = i;
+    if (pi_ < 0) {
+        if (npipes == 8) return false;
+        VkPipelineShaderStageCreateInfo stages[2] = {
+            {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT,
+             .module = vk_builtin_shader("post.vert"), .pName = "main"},
+            {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+             .module = vk_builtin_shader("depthcopy.frag"), .pName = "main"}};
+        VkPipelineVertexInputStateCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+        VkPipelineInputAssemblyStateCreateInfo ia = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+                                                     .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
+        VkPipelineViewportStateCreateInfo vs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1,
+                                                .scissorCount = 1};
+        VkPipelineRasterizationStateCreateInfo rs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+                                                     .polygonMode = VK_POLYGON_MODE_FILL, .cullMode = VK_CULL_MODE_NONE, .lineWidth = 1};
+        VkPipelineMultisampleStateCreateInfo ms = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+                                                   .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT};
+        VkPipelineDepthStencilStateCreateInfo ds = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+                                                    .depthTestEnable = VK_TRUE, .depthWriteEnable = VK_TRUE,
+                                                    .depthCompareOp = VK_COMPARE_OP_ALWAYS};
+        VkPipelineColorBlendStateCreateInfo cbs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+        VkDynamicState dyn[3] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+        uint32_t ndyn = 2;
+        fullscreen_vertex_dyn(dyn, &ndyn, 3);
+        VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = ndyn,
+                                               .pDynamicStates = dyn};
+        VkPipelineRenderingCreateInfo ri = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .depthAttachmentFormat = d->format,
+                                            .stencilAttachmentFormat = stencil ? d->format : VK_FORMAT_UNDEFINED};
+        VkGraphicsPipelineCreateInfo gi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &ri, .stageCount = 2,
+                                           .pStages = stages, .pVertexInputState = &vi, .pInputAssemblyState = &ia,
+                                           .pViewportState = &vs, .pRasterizationState = &rs, .pMultisampleState = &ms,
+                                           .pDepthStencilState = &ds, .pColorBlendState = &cbs, .pDynamicState = &dy, .layout = layout};
+        VkPipeline p = VK_NULL_HANDLE;
+        if (vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &gi, NULL, &p) != VK_SUCCESS) {
+            LOG("[vk] depth copy pipeline for format %d failed: transfers instead\n", d->format);
+            p = VK_NULL_HANDLE;
+        }
+        pi_ = npipes++;
+        pipes[pi_].f = d->format, pipes[pi_].stencil = stencil, pipes[pi_].p = p;
+    }
+    if (!pipes[pi_].p) return false;
+    VkComponentMapping ident = {0};  // (VK_COMPONENT_SWIZZLE_IDENTITY)
+    VkImageView sv = vk_image_view(s, VK_IMAGE_VIEW_TYPE_2D, s->format, slv, 1, sly, 1, ident, VK_IMAGE_ASPECT_DEPTH_BIT);
+    VkImageView dv = vk_image_view(d, VK_IMAGE_VIEW_TYPE_2D, d->format, dlv, 1, dly, 1, ident, d->aspect);
+    if (!sv || !dv) return false;
+    VkDescriptorSet set = vk_alloc_set(dsl);
+    VkDescriptorImageInfo ii = {vk_default_sampler(false), sv, VK_IMAGE_LAYOUT_GENERAL};
+    VkWriteDescriptorSet wr = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 0, .descriptorCount = 1,
+                               .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii};
+    rec_UpdateDescriptorSets(1, &wr);
+    VkRenderingAttachmentInfo da = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = dv,
+                                    .imageLayout = VK_IMAGE_LAYOUT_GENERAL, .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
+                                    .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
+    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{dx, dy}, {(uint32_t)dw, (uint32_t)dh}},
+                          .layerCount = 1, .pDepthAttachment = &da, .pStencilAttachment = stencil ? &da : NULL};
+    rec_CmdBeginRendering(cb, &ri);
+    rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipes[pi_].p);
+    ss_forget();  // (its own pipeline and state: the next draw sets everything again)
+    rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &set, 0, NULL);
+    VkViewport vp = {(float)dx, (float)dy, (float)dw, (float)dh, 0, 1};
+    VkRect2D sc = {{dx, dy}, {(uint32_t)dw, (uint32_t)dh}};
+    rec_CmdSetViewport(cb, 0, 1, &vp);
+    rec_CmdSetScissor(cb, 0, 1, &sc);
+    struct { int32_t r[4]; float s[4]; } pc = {{sx, sy, dx, dy}, {(float)sw / (float)dw, (float)sh / (float)dh, (float)(sx + sw - 1),
+                                                                  (float)(sy + sh - 1)}};
+    rec_CmdPushConstants(cb, layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
+    fullscreen_vertex_bind(cb);
+    rec_CmdDraw(cb, 3, 1, 0, 0);
+    rec_CmdEndRendering(cb);
+    vk_full_barrier(cb);
+    return true;
+}
+
 static void copy_texture_gpu(const TexRefRec *src, const TexRefRec *dst, uint64_t flags);
 // A copy into a pitch-linear texture (a stride: memory the CPU reads as it is) also lands in guest memory, read back
 // with the texture's own row pitch. Royale Z-A's profile photo: the frame is copied into a 1920x1080 linear RGBA8
@@ -9782,6 +10004,7 @@ static void copy_texture_gpu(const TexRefRec *src, const TexRefRec *dst, uint64_
     if (depth && (sa & da & VK_IMAGE_ASPECT_DEPTH_BIT) && (via_color || !depth_blit_ok(d->format) || !depth_blit_ok(s->format))) {
         dl_note("  depth blit via colour %p lv%u (%d,%d %dx%d) -> %p lv%u (%d,%d %dx%d)", (void *)s->image, slv, sx0, sy0, sw, sh,
                 (void *)d->image, dlv, dx0, dy0, dw, dh);
+        if (!via_color && depth_copy_draw(cb, s, d, slv, sly, sx0, sy0, sw, sh, dlv, dly, dx0, dy0, dw, dh)) return;
         depth_blit_via_color(cb, s, d, slv, sly, sx0, sy0, sw, sh, dlv, dly, dx0, dy0, dw, dh);
         return;
     }

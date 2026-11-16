@@ -43,6 +43,12 @@ bool gpu_feature_on(int feature, const char *env) {
     // cache warm (2950 pipelines, RTX 4060 Ti; the first start after switching builds them all once). (The early failures
     // in its shader compiler were the 512 MB storage-buffer limit, since bound in windows: 2 of 2988 fail now.)
     if (g_gpu_dozen && feature == GPU_SHADER_PREP) return true;
+    // Robust access 2 is off on Intel GPUs too, for speed: their driver makes every constant-buffer and image read check
+    // its bounds against the exact range bound, which Z-A's translated shaders (constant reads by the hundred) pay for
+    // everywhere - UHD Graphics (i3-1215U, driver 101.7092), native 1080p outdoors: 24.7 -> 27.9 fps, the same image.
+    // Reads past a buffer stay harmless without it (robustBufferAccess, always on), and images keep the first robustness
+    // level (vulkan/device.c x_ir).
+    if (g_gpu_vendor == 0x8086 && feature == GPU_ROBUST2) return false;
     return !(g_gpu_vendor == 0x1002 && (feature == GPU_ROBUST2 || feature == GPU_SHADER_PREP));
 }
 
@@ -436,6 +442,7 @@ void settings_load(void) {
         else bind_settings_load(key, val);  // bind_pad_* / bind_key_*: runtime/hle/bindings.c
     }
     fclose(f);
+    bind_settings_done();  // (second keys that clash: runtime/hle/bindings.c)
     if (!tip_key) g_settings.menu_tip_seen = true;  // (a settings file from before the note: not a first launch)
     if (!aspect_key) g_settings.aspect_asked = true;  // (likewise: the aspect ratio was chosen already)
     if (!video_key) g_settings.video_rec = VREC_ASK;  // (a file from before the recommendation: offered once, not imposed)

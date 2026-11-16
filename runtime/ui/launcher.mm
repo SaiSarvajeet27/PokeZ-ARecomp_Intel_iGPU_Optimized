@@ -104,8 +104,13 @@ static const char *build_version(const uint8_t id[8]) {
 }
 static bool build_is_za(const uint8_t id[8]) { return build_version(id) && memcmp(id, BUILD_ID, 8); }
 // The release tag this build is (also names the release files; Makefile / tools/bundle_macos.sh / make_dmg.sh read
-// it): ZA Recomp's v<major>.<minor>.<patch> (Hexveil404/PokeZ-ARecomp releases).
-#define LARECOMP_VERSION "v0.1.23"
+// it): ZA Recomp's v<major>.<minor>.<patch>, here with a letter - this community fork's builds of that version
+// (v0.1.23a: Intel iGPU optimizations and PC controls; docs/INTEL.md).
+#define LARECOMP_VERSION "v0.1.23a"
+// The project this build comes from: its page, its issues and the releases the start screen offers as updates. The
+// fork's own, so an update never puts upstream's build (without the fork's changes) over this one.
+#define PROJECT_REPO "SaiSarvajeet27/PokeZ-ARecomp_Intel_iGPU_Optimized"
+#define PROJECT_URL "https://github.com/" PROJECT_REPO
 extern "C" void rt_launcher_log(const char *fmt, ...);  // runtime/launcher_log.c: logs/launcher.log and stderr
 extern "C" const char *rt_version(void) { return LARECOMP_VERSION; }  // (runtime/main.c: the log's first line)
 extern "C" const char *larecomp_version(void) { return LARECOMP_VERSION; }  // (the shader caches' tag)
@@ -121,16 +126,25 @@ static void lang_update(void) { g_pt = settings_ui_portuguese(); }  // (runtime/
 // ------------------------------------------------------------------ update check
 // The start screen asks GitHub for the project's releases once per launch (a background curl, which macOS and
 // Windows 10+ ship) and offers the best one if it outranks this build: any v<x.y.z> above every beta, betas by
-// number; other tags are ignored. Offline / no curl / anything unexpected: nothing is shown.
-#define RELEASES_URL "https://api.github.com/repos/Hexveil404/PokeZ-ARecomp/releases?per_page=100"
-#define RELEASE_PAGE "https://github.com/Hexveil404/PokeZ-ARecomp/releases/tag/"
+// number; other tags are ignored. Offline / no curl / anything unexpected: nothing is shown. (The fork's releases:
+// PROJECT_REPO.)
+#define RELEASES_URL "https://api.github.com/repos/" PROJECT_REPO "/releases?per_page=100"
+#define RELEASE_PAGE PROJECT_URL "/releases/tag/"
 
+// v<x.y.z> above every beta; a fork build's letter (v0.1.23a, v0.1.23b...) just above its version and below the next
+// (v0.1.23 < v0.1.23a < v0.1.23b < v0.1.24). Anything else after the number: not a release tag (-1).
 static long long tag_rank(const std::string &t) {
-    int n, a, b, c;
+    int n, a, b, c, len = 0;
     char end;
     if (sscanf(t.c_str(), "beta_%d%c", &n, &end) == 1 && n > 0) return n;
-    if (sscanf(t.c_str(), "v%d.%d.%d%c", &a, &b, &c, &end) == 3 && a >= 0 && b >= 0 && c >= 0 && b < 4096 && c < 4096)
-        return (1LL << 48) + ((long long)a << 24) + ((long long)b << 12) + c;
+    if (sscanf(t.c_str(), "v%d.%d.%d%n", &a, &b, &c, &len) == 3 && a >= 0 && b >= 0 && c >= 0 && a < 4096 && b < 4096 &&
+        c < 4096) {
+        const char *rest = t.c_str() + len;
+        int letter = 0;
+        if (rest[0] >= 'a' && rest[0] <= 'z' && !rest[1]) letter = rest[0] - 'a' + 1;
+        else if (rest[0]) return -1;
+        return (1LL << 48) + ((((long long)a << 24) + ((long long)b << 12) + c) << 5) + letter;
+    }
     return -1;
 }
 
@@ -740,7 +754,7 @@ static bool import_packages(const std::vector<std::string> &pkgs, const std::str
 // Controls tab (both in the background: from the next start). zaprompts --install draws them into textures/prompts.new
 // and swaps that in whole itself (a game never sees half a set). Up to 3 tries per stamp (textures/prompts.tried):
 // failing leaves the game's own icons. Log: textures/prompts.log.
-#define PROMPTS_VERSION "4-xbox1"
+#define PROMPTS_VERSION "5-mouse1"  // (5: an input on a mouse button shows the mouse: bind_mouse_* are in the stamp)
 static std::atomic<bool> g_prompts_busy{false};
 static PlatProc g_prompts_proc;  // (the one left running: a newer rebind ends it and starts over)
 static std::string prompts_stamp(void) {
@@ -750,6 +764,7 @@ static std::string prompts_stamp(void) {
     };
     mix(g_bind_pad, sizeof g_bind_pad);
     mix(g_bind_key, sizeof g_bind_key);
+    mix(g_bind_mouse, sizeof g_bind_mouse);
     // An imported/replaced game must regenerate its private resources too, even
     // when bindings did not change. Runtime still verifies the actual source bytes.
     for (const char *name : {"/romfs.bin", "/romfs/arc/data.trpfs", "/exefs/main"}) {
@@ -3418,10 +3433,10 @@ extern "C" void launcher_run(const char *root) {
                                        "este projeto não tem ligação com eles.");
                 y += text(dl, F_BODY, 16, x, y, C_SOFT, about, w).y + 26;
                 if (button("##gh", TR("Project page (GitHub)", "Página do projeto (GitHub)"), x, y, 0, 48, BTN_SECONDARY))
-                    SDL_OpenURL("https://github.com/Hexveil404/PokeZ-ARecomp");
+                    SDL_OpenURL(PROJECT_URL);
                 float bx2 = x + ImGui::GetItemRectSize().x / g_s + 12;
                 if (button("##issues", TR("Report a problem", "Relatar um problema"), bx2, y, 0, 48, BTN_SECONDARY))
-                    SDL_OpenURL("https://github.com/Hexveil404/PokeZ-ARecomp/issues");
+                    SDL_OpenURL(PROJECT_URL "/issues");
                 bx2 += ImGui::GetItemRectSize().x / g_s + 12;
                 if (button("##logs", TR("Open the logs folder", "Abrir a pasta de logs"), bx2, y, 0, 48, BTN_SECONDARY, true, IC_FOLDER))
                     reveal_folder("logs");

@@ -433,16 +433,29 @@ ARROWS = {'Up': 'up', 'Down': 'down', 'Left': 'left', 'Right': 'right'}
 PAD_DEFAULTS = {'a': 'east', 'b': 'south', 'x': 'north', 'y': 'west', 'lstick': 'lstick', 'rstick': 'rstick',
                 'l': 'lshoulder', 'r': 'rshoulder', 'zl': 'ltrigger', 'zr': 'rtrigger', 'plus': 'start', 'minus': 'back',
                 'left': 'dpad_left', 'up': 'dpad_up', 'right': 'dpad_right', 'down': 'dpad_down'}
-binds, pad_binds = dict(DEFAULTS), dict(PAD_DEFAULTS)
+# the mouse: the Switch input each button presses (bind_mouse_*; runtime/hle/bindings.c DEF_MOUSE), only while the mouse
+# camera is on (mouse_camera, not "off": the buttons work only then). An input on a mouse button shows the button in the
+# keyboard's icons (a PC player's left click throws the ball: "LMB", not the key that also does). The wheel's notches
+# add to keys (the d-pad's): those keep the key's name.
+MOUSE_DEFAULTS = {'left': 'zr', 'right': 'zl', 'middle': None, 'x1': None, 'x2': None}
+MOUSE_LABEL = {'left': 'LMB', 'right': 'RMB', 'middle': 'MMB', 'x1': 'M4', 'x2': 'M5'}
+binds, pad_binds, mouse_binds, mouse_camera = dict(DEFAULTS), dict(PAD_DEFAULTS), dict(MOUSE_DEFAULTS), 'captured'
 if args.settings:
     for line in open(args.settings, encoding='utf-8', errors='replace'):
         k, _, v = line.partition('=')
         k, v = k.strip(), v.strip()
         if k.startswith('bind_key_') and v and k[9:] in binds: binds[k[9:]] = v
         if k.startswith('bind_pad_') and v and k[9:] in pad_binds: pad_binds[k[9:]] = v
+        if k.startswith('bind_mouse_') and v and k[11:] in mouse_binds: mouse_binds[k[11:]] = None if v == 'none' else v
+        if k == 'mouse_camera' and v: mouse_camera = v
+on_mouse = {}  # Switch input -> the mouse button's label (the first button in MOUSE_LABEL's order)
+if mouse_camera != 'off':
+    for m, b in mouse_binds.items():
+        if b and b not in on_mouse: on_mouse[b] = MOUSE_LABEL[m]
 
 
 def key(slot):
+    if slot in on_mouse: return on_mouse[slot]
     v = binds[slot]
     if v in ARROWS: return ('arrow', ARROWS[v])
     if v.startswith('Keypad ') and len(v) == 8: return v[7]

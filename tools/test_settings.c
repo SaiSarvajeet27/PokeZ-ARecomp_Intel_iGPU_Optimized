@@ -6,6 +6,7 @@
 
 bool bind_settings_load(const char *key, const char *val) { (void)key; (void)val; return false; }
 void bind_settings_save(FILE *file) { (void)file; }
+void bind_settings_done(void) {}
 
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "upscaler-auto")) {  // "upscaler = auto" / no upscaler line: the GPU's default
